@@ -1,21 +1,21 @@
 import { Client } from "pg";
 import { execTest } from "./test-util";
-import { Id, Ids, QueryResult } from "./types";
+import { Value } from "./types";
 
-const eq = (id1: Id, id2: Id): boolean => {
-  if (id1 === null) return false;
-  if (id2 === null) return false;
+const eq = (val1: Value, val2: Value): boolean => {
+  if (val1 === null) return false;
+  if (val2 === null) return false;
 
-  return id1 === id2;
+  return val1 === val2;
 };
 
-const innerJoin = (t1: Ids, t2: Ids): QueryResult => {
-  let res: QueryResult = [];
+const innerJoin = (t1: [Value][], t2: [Value][]): [Value, Value][] => {
+  let res: [Value, Value][] = [];
 
-  for (const id1 of t1) {
-    for (const id2 of t2) {
-      if (eq(id1, id2)) {
-        res.push({ t1_id: id1, t2_id: id2 });
+  for (const [val1] of t1) {
+    for (const [val2] of t2) {
+      if (eq(val1, val2)) {
+        res.push([val1, val2]);
       }
     }
   }
@@ -23,44 +23,42 @@ const innerJoin = (t1: Ids, t2: Ids): QueryResult => {
   return res;
 };
 
-const leftOuterJoin = (t1: Ids, t2: Ids): QueryResult => {
-  let res: QueryResult = [];
+const leftOuterJoin = (t1: [Value][], t2: [Value][]): [Value, Value][] => {
+  let res: [Value, Value][] = [];
 
-  for (const id1 of t1) {
+  for (const [val1] of t1) {
     let selected = false;
-    for (const id2 of t2) {
-      if (eq(id1, id2)) {
-        res.push({ t1_id: id1, t2_id: id2 });
+    for (const [val2] of t2) {
+      if (eq(val1, val2)) {
+        res.push([val1, val2]);
         selected = true;
       }
     }
 
-    if (!selected) res.push({ t1_id: id1, t2_id: null });
+    if (!selected) res.push([val1, null]);
   }
 
   return res;
 };
 
-const fullOuterJoin = (t1: Ids, t2: Ids): QueryResult => {
-  let res: QueryResult = [];
+const fullOuterJoin = (t1: [Value][], t2: [Value][]): [Value, Value][] => {
+  let res: [Value, Value][] = [];
 
-  let t1Selected = new Map<number, boolean>();
-  let t2Selected = new Map<number, boolean>();
-  for (const [idx1, id1] of t1.entries()) {
-    for (const [idx2, id2] of t2.entries()) {
-      if (eq(id1, id2)) {
-        res.push({ t1_id: id1, t2_id: id2 });
-        t1Selected.set(idx1, true);
-        t2Selected.set(idx2, true);
+  let selectedT1Val = new Set<number>();
+  let selectedT2Val = new Set<number>();
+  for (const [idx1, [val1]] of t1.entries()) {
+    for (const [idx2, [val2]] of t2.entries()) {
+      if (eq(val1, val2)) {
+        res.push([val1, val2]);
+        selectedT1Val.add(idx1);
+        selectedT2Val.add(idx2);
       }
     }
   }
-  for (const [idx1, id1] of t1.entries())
-    if (t1Selected.get(idx1) === undefined)
-      res.push({ t1_id: id1, t2_id: null });
-  for (const [idx2, id2] of t2.entries())
-    if (t2Selected.get(idx2) === undefined)
-      res.push({ t1_id: null, t2_id: id2 });
+  for (const [idx1, [val1]] of t1.entries())
+    if (!selectedT1Val.has(idx1)) res.push([val1, null]);
+  for (const [idx2, [val2]] of t2.entries())
+    if (!selectedT2Val.has(idx2)) res.push([null, val2]);
 
   return res;
 };
@@ -74,8 +72,8 @@ const client = new Client({
   database: "postgres",
 });
 
-type PGResult = { command: string; rows: QueryResult }[];
-const extractQueryResult = (pgResult: PGResult): QueryResult => {
+type PGResult = { command: string; rows: { t1_val: Value; t2_val: Value }[] }[];
+const extractQueryResult = (pgResult: PGResult): [Value, Value][] => {
   const selectResult = (pgResult as unknown as PGResult).find(
     (x) => x.command === "SELECT"
   );
@@ -84,62 +82,71 @@ const extractQueryResult = (pgResult: PGResult): QueryResult => {
     process.exit(-1);
   }
 
-  return selectResult.rows;
+  return selectResult.rows.map((row) => [row.t1_val, row.t2_val]);
 };
 
-const resetTable = (table: string, ids: Ids): string => {
-  const serializedIds = ids.map((row) => `(${row})`).join(",");
+const resetTable = (tableName: string, table: [Value][]): string => {
+  const serializedVals = table.map(([val]) => `(${val})`).join(",");
   return (
-    `truncate table ${table};` +
-    (ids.length !== 0
-      ? `insert into ${table} (id) values ${serializedIds};`
+    `truncate table ${tableName};` +
+    (table.length !== 0
+      ? `insert into ${tableName} (val) values ${serializedVals};`
       : "")
   );
 };
 
-const innerJoinNaive = async (t1: Ids, t2: Ids): Promise<QueryResult> => {
+const innerJoinNaive = async (
+  t1: [Value][],
+  t2: [Value][]
+): Promise<[Value, Value][]> => {
   const res = await client.query(`
     ${resetTable("t1", t1)}
     ${resetTable("t2", t2)}
 
     select
-      t1.id as t1_id,
-      t2.id as t2_id
+      t1.val as t1_val,
+      t2.val as t2_val
     from
       t1
-      inner join t2 on t1.id = t2.id;
+      inner join t2 on t1.val = t2.val;
   `);
 
   return extractQueryResult(res as unknown as PGResult);
 };
 
-const leftOuterJoinNaive = async (t1: Ids, t2: Ids): Promise<QueryResult> => {
+const leftOuterJoinNaive = async (
+  t1: [Value][],
+  t2: [Value][]
+): Promise<[Value, Value][]> => {
   const res = await client.query(`
     ${resetTable("t1", t1)}
     ${resetTable("t2", t2)}
 
     select
-      t1.id as t1_id,
-      t2.id as t2_id
+      t1.val as t1_val,
+      t2.val as t2_val
     from
       t1
-      left outer join t2 on t1.id = t2.id;
+      left outer join t2 on t1.val = t2.val;
   `);
 
   return extractQueryResult(res as unknown as PGResult);
 };
 
-const fullOuterJoinNaive = async (t1: Ids, t2: Ids): Promise<QueryResult> => {
+const fullOuterJoinNaive = async (
+  t1: [Value][],
+  t2: [Value][]
+): Promise<[Value, Value][]> => {
   const res = await client.query(`
     ${resetTable("t1", t1)}
     ${resetTable("t2", t2)}
 
     select
-      t1.id as t1_id,
-      t2.id as t2_id
+      t1.val as t1_val,
+      t2.val as t2_val
     from
       t1
-      full outer join t2 on t1.id = t2.id;
+      full outer join t2 on t1.val = t2.val;
   `);
 
   return extractQueryResult(res as unknown as PGResult);
@@ -148,8 +155,8 @@ const fullOuterJoinNaive = async (t1: Ids, t2: Ids): Promise<QueryResult> => {
 const main = async () => {
   await client.connect();
 
-  await client.query("create table if not exists t1 (id integer);");
-  await client.query("create table if not exists t2 (id integer);");
+  await client.query("create table if not exists t1 (val integer);");
+  await client.query("create table if not exists t2 (val integer);");
 
   const times = 1000;
 
